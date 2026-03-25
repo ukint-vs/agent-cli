@@ -1,0 +1,16 @@
+# Autoresearch live adapter — SOL testnet config ($600 account, 4 coins)
+# Run: hl run --config configs/autoresearch_testnet/autoresearch_sol.yaml
+strategy: autoresearch
+instrument: SOL-PERP
+tick_interval: 10.0
+data_dir: data/autoresearch_testnet/sol
+
+strategy_params:
+  equity: 150.0  # $600 / 4 coins
+
+max_position_qty: 1.1     # ~$150 at ~$140
+max_notional_usd: 500
+max_order_size: 1.1
+max_daily_drawdown_pct: 10.0
+max_leverage: 5.0
+tvl: 150.0

@@ -1,0 +1,16 @@
+# Autoresearch live adapter — BTC testnet config ($600 account, 4 coins)
+# Run: hl run --config configs/autoresearch_testnet/autoresearch_btc.yaml
+strategy: autoresearch
+instrument: BTC-PERP
+tick_interval: 10.0
+data_dir: data/autoresearch_testnet/btc
+
+strategy_params:
+  equity: 150.0  # $600 / 4 coins
+
+max_position_qty: 0.002   # ~$150 at ~$87k
+max_notional_usd: 500
+max_order_size: 0.002
+max_daily_drawdown_pct: 10.0
+max_leverage: 5.0
+tvl: 150.0

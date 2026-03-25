@@ -15,17 +15,17 @@ def run_cmd(
         ...,
         help="Strategy name (e.g., 'avellaneda_mm') or path ('module:ClassName')",
     ),
-    instrument: str = typer.Option(
-        "ETH-PERP", "--instrument", "-i",
-        help="Trading instrument (ETH-PERP, VXX-USDYP, US3M-USDYP)",
+    instrument: Optional[str] = typer.Option(
+        None, "--instrument", "-i",
+        help="Trading instrument (ETH-PERP, VXX-USDYP, US3M-USDYP). Default: from config or ETH-PERP",
     ),
-    tick_interval: float = typer.Option(
-        10.0, "--tick", "-t",
-        help="Seconds between ticks",
+    tick_interval: Optional[float] = typer.Option(
+        None, "--tick", "-t",
+        help="Seconds between ticks. Default: from config or 10.0",
     ),
     config: Optional[Path] = typer.Option(
         None, "--config", "-c",
-        help="YAML config file (overrides CLI flags)",
+        help="YAML config file. CLI flags override config values when explicitly set.",
     ),
     mainnet: bool = typer.Option(
         False, "--mainnet",
@@ -43,13 +43,17 @@ def run_cmd(
         True, "--resume/--fresh",
         help="Resume from saved state or start fresh",
     ),
-    data_dir: str = typer.Option(
-        "data/cli", "--data-dir",
-        help="Directory for state and trade logs",
+    data_dir: Optional[str] = typer.Option(
+        None, "--data-dir",
+        help="Directory for state and trade logs. Default: from config or data/cli",
     ),
     mock: bool = typer.Option(
         False, "--mock",
         help="Use mock market data (no HL connection needed)",
+    ),
+    paper: bool = typer.Option(
+        False, "--paper",
+        help="Paper trading: real market data, simulated execution",
     ),
     model: Optional[str] = typer.Option(
         None, "--model",
@@ -72,12 +76,18 @@ def run_cmd(
         cfg = TradingConfig()
 
     cfg.strategy = strategy
-    cfg.instrument = resolve_instrument(instrument)
-    cfg.tick_interval = tick_interval
-    cfg.mainnet = mainnet
-    cfg.dry_run = dry_run
-    cfg.max_ticks = max_ticks
-    cfg.data_dir = data_dir
+    if instrument is not None:
+        cfg.instrument = resolve_instrument(instrument)
+    if tick_interval is not None:
+        cfg.tick_interval = tick_interval
+    if mainnet:
+        cfg.mainnet = True
+    if dry_run:
+        cfg.dry_run = True
+    if max_ticks:
+        cfg.max_ticks = max_ticks
+    if data_dir is not None:
+        cfg.data_dir = data_dir
 
     # Setup logging
     logging.basicConfig(
@@ -211,7 +221,20 @@ def run_cmd(
             raise typer.Exit(code=1)
 
     # Build HL adapter
-    if mock or dry_run:
+    if paper:
+        from cli.hl_adapter import DirectHLProxy
+        from parent.hl_proxy import HLProxy
+        from adapters.paper_adapter import PaperTradingProxy
+
+        private_key = cfg.get_private_key()
+        raw_hl = HLProxy(private_key=private_key, testnet=not cfg.mainnet)
+        real_proxy = DirectHLProxy(raw_hl)
+        paper_dir = f"{cfg.data_dir}/paper"
+        hl = PaperTradingProxy(real_proxy, data_dir=paper_dir)
+        cfg.data_dir = paper_dir
+        network = "mainnet" if cfg.mainnet else "testnet"
+        typer.echo(f"Mode: PAPER ({network} data, simulated execution)")
+    elif mock or dry_run:
         from cli.hl_adapter import DirectMockProxy
         hl = DirectMockProxy()
         typer.echo(f"Mode: {'DRY RUN' if dry_run else 'MOCK'}")

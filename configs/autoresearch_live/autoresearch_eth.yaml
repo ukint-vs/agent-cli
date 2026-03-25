@@ -1,0 +1,18 @@
+# Autoresearch live adapter — ETH mainnet ($300 account, 3x leverage, 4 coins)
+# equity = $300 * 3x / 4 = $225 (leverage-adjusted per-coin equity)
+# Run: hl run --config configs/autoresearch_live/autoresearch_eth.yaml --mainnet
+strategy: autoresearch
+instrument: ETH-PERP
+tick_interval: 60.0
+mainnet: true
+data_dir: data/autoresearch/eth
+
+strategy_params:
+  equity: 225.0  # $300 * 3x leverage / 4 coins
+
+max_position_qty: 0.1     # ~$210 at ~$2100
+max_notional_usd: 250
+max_order_size: 0.1
+max_daily_drawdown_pct: 5.0
+max_leverage: 3.0
+tvl: 75.0

@@ -1,0 +1,16 @@
+# Autoresearch live adapter — DOGE testnet config ($600 account, 4 coins)
+# Run: hl run --config configs/autoresearch_testnet/autoresearch_doge.yaml
+strategy: autoresearch
+instrument: DOGE-PERP
+tick_interval: 10.0
+data_dir: data/autoresearch_testnet/doge
+
+strategy_params:
+  equity: 150.0  # $600 / 4 coins
+
+max_position_qty: 800     # ~$150 at ~$0.19
+max_notional_usd: 500
+max_order_size: 800
+max_daily_drawdown_pct: 10.0
+max_leverage: 5.0
+tvl: 150.0

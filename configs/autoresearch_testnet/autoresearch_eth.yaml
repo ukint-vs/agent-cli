@@ -1,0 +1,16 @@
+# Autoresearch live adapter — ETH testnet config ($600 account, 4 coins)
+# Run: hl run --config configs/autoresearch_testnet/autoresearch_eth.yaml
+strategy: autoresearch
+instrument: ETH-PERP
+tick_interval: 10.0
+data_dir: data/autoresearch_testnet/eth
+
+strategy_params:
+  equity: 150.0  # $600 / 4 coins
+
+max_position_qty: 0.08    # ~$150 at ~$2100
+max_notional_usd: 500
+max_order_size: 0.08
+max_daily_drawdown_pct: 10.0
+max_leverage: 5.0
+tvl: 150.0

@@ -94,6 +94,16 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "description": "EMA crossover + ADX trend strength filter — avoid chop, catch sustained moves",
         "params": {"size": 1.0},
     },
+    "autoresearch": {
+        "path": "strategies.autoresearch_live:AutoresearchLiveAdapter",
+        "description": "Live adapter wrapping auto-researchtrading strategy.py (always latest)",
+        "params": {"instrument": "ETH", "equity": 100000},
+    },
+    "autoresearch_legacy": {
+        "path": "strategies.autoresearch:AutoresearchStrategy",
+        "description": "[DEPRECATED] Stale manual port of S4 champion — use 'autoresearch' instead",
+        "params": {"tvl": 500.0, "leverage": 3.0, "coin_weight": 0.25},
+    },
 }
 
 # YEX market definitions — Nunchi HIP-3 yield perpetuals
