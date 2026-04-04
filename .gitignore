@@ -29,3 +29,6 @@ Thumbs.db
 
 # Test / build artifacts
 .pytest_cache/
+
+# AI
+.claude

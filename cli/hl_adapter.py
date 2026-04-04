@@ -13,9 +13,8 @@ import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+from common.models import HIP3_DEXS, instrument_to_coin
 from parent.hl_proxy import HLFill, HLProxy, MockHLProxy
-
-from cli.strategy_registry import YEX_MARKETS
 
 log = logging.getLogger("hl_adapter")
 
@@ -47,10 +46,7 @@ def _to_hl_coin(instrument: str) -> str:
     YEX markets:     VXX-USDYP -> yex:VXX
                      US3M-USDYP -> yex:US3M
     """
-    yex = YEX_MARKETS.get(instrument)
-    if yex:
-        return yex["hl_coin"]
-    return instrument.replace("-PERP", "").replace("-perp", "")
+    return instrument_to_coin(instrument)
 
 
 class DirectHLProxy:
@@ -94,9 +90,9 @@ class DirectHLProxy:
             )
 
         try:
-            yex = YEX_MARKETS.get(instrument)
-            if yex:
-                snap = self._get_yex_snapshot(instrument, yex["hl_coin"])
+            hl_coin = instrument_to_coin(instrument)
+            if ":" in hl_coin:
+                snap = self._get_hip3_snapshot(instrument, hl_coin)
             else:
                 snap = self._hl.get_snapshot(instrument)
 
@@ -118,8 +114,8 @@ class DirectHLProxy:
             from common.models import MarketSnapshot
             return MarketSnapshot(instrument=instrument)
 
-    def _get_yex_snapshot(self, instrument: str, hl_coin: str):
-        """Fetch snapshot for a YEX market using its yex: prefixed coin."""
+    def _get_hip3_snapshot(self, instrument: str, hl_coin: str):
+        """Fetch snapshot for a HIP-3 DEX market via L2 book."""
         from common.models import MarketSnapshot
         try:
             book = self._info.l2_snapshot(hl_coin)
@@ -140,7 +136,7 @@ class DirectHLProxy:
                 timestamp_ms=int(time.time() * 1000),
             )
         except Exception as e:
-            log.error("Failed to get YEX snapshot for %s (%s): %s", instrument, hl_coin, e)
+            log.error("Failed to get HIP-3 snapshot for %s (%s): %s", instrument, hl_coin, e)
             return MarketSnapshot(instrument=instrument)
 
     def get_account_state(self) -> Dict:
@@ -171,6 +167,17 @@ class DirectHLProxy:
         except Exception as e:
             log.error("Failed to get account state: %s", e)
             return {}
+
+        # Merge HIP-3 DEX positions (e.g. YEX) so watchdog/reconciliation sees them.
+        for dex_id in HIP3_DEXS:
+            try:
+                dex_state = self._info.post("/info", {
+                    "type": "clearinghouseState", "user": self._address, "dex": dex_id,
+                })
+                if dex_state and dex_state.get("assetPositions"):
+                    result["positions"].extend(dex_state["assetPositions"])
+            except Exception as e:
+                log.warning("Failed to fetch %s positions: %s", dex_id, e)
 
         # Fetch spot balances (separate endpoint).
         spot_balances = self._fetch_spot_balances()
@@ -269,6 +276,16 @@ class DirectHLProxy:
                     name = asset.get("name", "")
                     if name:
                         self._sz_decimals_cache[name] = int(asset.get("szDecimals", 1))
+                # Include HIP-3 DEX assets
+                for dex_id in HIP3_DEXS:
+                    try:
+                        dex_meta = self._info.meta(dex=dex_id)
+                        for asset in dex_meta.get("universe", []):
+                            name = asset.get("name", "")
+                            if name:
+                                self._sz_decimals_cache[name] = int(asset.get("szDecimals", 1))
+                    except Exception:
+                        pass
             except Exception:
                 pass
         return self._sz_decimals_cache.get(coin, 1)
@@ -401,7 +418,13 @@ class DirectHLProxy:
                 return fill
             elif "resting" in status:
                 oid = status["resting"].get("oid", "") if isinstance(status["resting"], dict) else ""
-                log.info("Resting [%s]: %s %s %s @ %s (oid=%s)", tif, side, size, instrument, price, oid)
+                log.info("Resting [%s]: %s %s %s @ %s (oid=%s) — cancelling",
+                         tif, side, size, instrument, price, oid)
+                if oid:
+                    try:
+                        self._exchange.cancel(coin, int(oid))
+                    except Exception:
+                        log.warning("Failed to cancel resting order %s for %s", oid, instrument)
                 return None
             elif "error" in status:
                 log.info("No fill [%s]: %s %s %s @ %s -- %s", tif, side, size, instrument, price, status["error"])
@@ -457,6 +480,14 @@ class DirectHLProxy:
         """Fetch mid prices for all assets."""
         return self._hl.get_all_mids()
 
+    def get_dex_markets(self, dex: str) -> list:
+        """Fetch HIP-3 DEX metaAndAssetCtxs."""
+        return self._hl.get_dex_markets(dex)
+
+    def get_dex_mids(self, dex: str) -> Dict[str, str]:
+        """Fetch HIP-3 DEX mid prices."""
+        return self._hl.get_dex_mids(dex)
+
     def _to_coin(self, instrument: str) -> str:
         """Map instrument to HL coin symbol."""
         return _to_hl_coin(instrument)
@@ -480,7 +511,7 @@ class DirectHLProxy:
         try:
             result = self._exchange.order(
                 coin, is_buy, sz, trigger_price,
-                order_type={"trigger": {"triggerPx": str(trigger_price), "isMarket": True, "tpsl": "sl"}},
+                order_type={"trigger": {"triggerPx": trigger_price, "isMarket": True, "tpsl": "sl"}},
                 reduce_only=True,
                 builder=builder,
             )
@@ -565,6 +596,14 @@ class DirectMockProxy:
     def get_all_mids(self) -> Dict[str, str]:
         """Return mock mid prices."""
         return self._mock.get_all_mids()
+
+    def get_dex_markets(self, dex: str) -> list:
+        """Return mock HIP-3 DEX markets."""
+        return self._mock.get_dex_markets(dex)
+
+    def get_dex_mids(self, dex: str) -> Dict[str, str]:
+        """Return mock HIP-3 DEX mids."""
+        return self._mock.get_dex_mids(dex)
 
     def place_trigger_order(self, instrument: str, side: str, size: float, trigger_price: float) -> Optional[str]:
         """Place a mock trigger stop-loss order. Returns OID."""

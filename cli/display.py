@@ -5,6 +5,8 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from common.models import instrument_to_asset
+
 # ANSI color codes
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -44,7 +46,7 @@ def tick_line(
 ) -> str:
     """One-line tick summary for console output."""
     ts = time.strftime("%H:%M:%S")
-    coin = instrument.replace("-PERP", "").replace("-USDYP", "")
+    coin = instrument_to_asset(instrument)
 
     pos_str = f"{_sign(pos_qty)}" if pos_qty != 0 else "flat"
     entry_str = f" @ {avg_entry:.2f}" if pos_qty != 0 else ""

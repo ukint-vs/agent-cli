@@ -98,6 +98,7 @@ class ApexConfig:
 
     # Instrument filters
     excluded_instruments: List[str] = field(default_factory=list)
+    allowed_instruments: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.margin_per_slot == 0.0:

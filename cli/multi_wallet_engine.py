@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
 from cli.engine import TradingEngine
+from common.models import instrument_to_coin
 from common.venue_adapter import VenueAdapter
 from modules.wallet_manager import WalletConfig, WalletManager
 from parent.house_risk import HouseRiskManager
@@ -151,7 +152,7 @@ class MultiWalletEngine:
         for ctx in self._contexts.values():
             eng = ctx.engine
             if not eng.dry_run and hasattr(eng.hl, "set_leverage"):
-                coin = eng.instrument.replace("-PERP", "").replace("-perp", "")
+                coin = instrument_to_coin(eng.instrument)
                 max_lev = int(eng.risk_manager.limits.max_leverage)
                 eng.hl.set_leverage(max_lev, coin)
 

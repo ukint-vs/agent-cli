@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from common.models import coin_to_instrument
+
 
 @dataclass
 class Discrepancy:
@@ -75,7 +77,7 @@ class ReconciliationEngine:
             coin = p.get("coin", "")
             if not coin:
                 continue
-            instrument = f"{coin}-PERP"
+            instrument = coin_to_instrument(coin)
             exchange_map[instrument] = {
                 "size": abs(szi),
                 "szi": szi,

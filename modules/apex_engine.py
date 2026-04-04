@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from common.models import asset_matches_allowed, asset_to_instrument, instrument_to_asset
 from modules.apex_config import ApexConfig
 from modules.apex_state import ApexSlot, ApexState
 
@@ -31,6 +32,18 @@ class ApexEngine:
 
     def __init__(self, config: ApexConfig):
         self.config = config
+
+    def _instrument_eligible(self, instrument: str, active_instruments: set) -> bool:
+        cfg = self.config
+        if instrument in active_instruments:
+            return False
+        if instrument in cfg.excluded_instruments:
+            return False
+        if cfg.allowed_instruments:
+            asset = instrument_to_asset(instrument)
+            if not asset_matches_allowed(asset, cfg.allowed_instruments):
+                return False
+        return True
 
     def evaluate(
         self,
@@ -132,7 +145,7 @@ class ApexEngine:
         )
 
         # 3. Conviction collapse
-        coin = slot.instrument.replace("-PERP", "")
+        coin = instrument_to_asset(slot.instrument)
         still_in_signals = any(
             s.get("asset") == coin for s in pulse_signals
         )
@@ -183,74 +196,78 @@ class ApexEngine:
         actions: List[ApexAction] = []
         active_instruments = state.active_instruments()
 
+        # Pre-filter signals to eligible instruments only
+        def eligible(asset: str) -> bool:
+            return self._instrument_eligible(asset_to_instrument(asset), active_instruments)
+
+        pulse_signals = [s for s in pulse_signals if eligible(s.get("asset", ""))]
+        radar_opps = [o for o in radar_opps if eligible(o.get("asset", ""))]
+        smart_money_signals = [s for s in (smart_money_signals or []) if eligible(s.get("asset", ""))]
+        strategy_signals = [s for s in (strategy_signals or []) if eligible(s.get("asset", ""))]
+
         # Collect candidates in priority order
         candidates: List[Dict[str, Any]] = []
 
         # Priority 1: Pulse IMMEDIATE signals
         for sig in pulse_signals:
             if sig.get("signal_type") == "IMMEDIATE_MOVER" and cfg.pulse_immediate_auto_entry:
-                instrument = sig["asset"] + "-PERP"
-                if instrument not in active_instruments and instrument not in cfg.excluded_instruments:
-                    candidates.append({
-                        "instrument": instrument,
-                        "direction": sig.get("direction", "LONG").lower(),
-                        "source": "pulse_immediate",
-                        "score": sig.get("confidence", 100),
-                        "priority": 1,
-                    })
+                instrument = asset_to_instrument(sig["asset"])
+                candidates.append({
+                    "instrument": instrument,
+                    "direction": sig.get("direction", "LONG").lower(),
+                    "source": "pulse_immediate",
+                    "score": sig.get("confidence", 100),
+                    "priority": 1,
+                })
 
         # Priority 1.5: Smart money signals (HIGH_CONVICTION) / 2.5 (SMART_MONEY)
-        for sig in (smart_money_signals or []):
+        for sig in smart_money_signals:
             if sig.get("confidence", 0) >= 60:
-                instrument = sig["asset"] + "-PERP"
-                if instrument not in active_instruments and instrument not in cfg.excluded_instruments:
-                    candidates.append({
-                        "instrument": instrument,
-                        "direction": sig.get("direction", "LONG").lower(),
-                        "source": f"smart_money:{sig.get('signal_type', '')}",
-                        "score": sig.get("confidence", 0),
-                        "priority": 1.5 if sig.get("signal_type") == "HIGH_CONVICTION" else 2.5,
-                    })
+                instrument = asset_to_instrument(sig["asset"])
+                candidates.append({
+                    "instrument": instrument,
+                    "direction": sig.get("direction", "LONG").lower(),
+                    "source": f"smart_money:{sig.get('signal_type', '')}",
+                    "score": sig.get("confidence", 0),
+                    "priority": 1.5 if sig.get("signal_type") == "HIGH_CONVICTION" else 2.5,
+                })
 
         # Priority 2: Radar high scores
         for opp in radar_opps:
             if opp.get("final_score", 0) >= cfg.radar_score_threshold:
-                instrument = opp["asset"] + "-PERP"
-                if instrument not in active_instruments and instrument not in cfg.excluded_instruments:
-                    candidates.append({
-                        "instrument": instrument,
-                        "direction": opp.get("direction", "LONG").lower(),
-                        "source": "radar",
-                        "score": opp.get("final_score", 0),
-                        "priority": 2,
-                    })
+                instrument = asset_to_instrument(opp["asset"])
+                candidates.append({
+                    "instrument": instrument,
+                    "direction": opp.get("direction", "LONG").lower(),
+                    "source": "radar",
+                    "score": opp.get("final_score", 0),
+                    "priority": 2,
+                })
 
         # Priority 2.25: Directional strategy signals
-        for sig in (strategy_signals or []):
+        for sig in strategy_signals:
             if sig.get("confidence", 0) >= cfg.pulse_confidence_threshold:
-                instrument = sig["asset"] + "-PERP"
-                if instrument not in active_instruments and instrument not in cfg.excluded_instruments:
-                    candidates.append({
-                        "instrument": instrument,
-                        "direction": sig.get("direction", "long").lower(),
-                        "source": sig.get("source", "strategy"),
-                        "score": sig.get("confidence", 75),
-                        "priority": 2.25,
-                    })
+                instrument = asset_to_instrument(sig["asset"])
+                candidates.append({
+                    "instrument": instrument,
+                    "direction": sig.get("direction", "long").lower(),
+                    "source": sig.get("source", "strategy"),
+                    "score": sig.get("confidence", 75),
+                    "priority": 2.25,
+                })
 
         # Priority 3: Pulse other signals
         for sig in pulse_signals:
             if sig.get("signal_type") != "IMMEDIATE_MOVER":
                 if sig.get("confidence", 0) >= cfg.pulse_confidence_threshold:
-                    instrument = sig["asset"] + "-PERP"
-                    if instrument not in active_instruments and instrument not in cfg.excluded_instruments:
-                        candidates.append({
-                            "instrument": instrument,
-                            "direction": sig.get("direction", "LONG").lower(),
-                            "source": "pulse_signal",
-                            "score": sig.get("confidence", 0),
-                            "priority": 3,
-                        })
+                    instrument = asset_to_instrument(sig["asset"])
+                    candidates.append({
+                        "instrument": instrument,
+                        "direction": sig.get("direction", "LONG").lower(),
+                        "source": "pulse_signal",
+                        "score": sig.get("confidence", 0),
+                        "priority": 3,
+                    })
 
         # Deduplicate by instrument (keep highest priority)
         seen = set()

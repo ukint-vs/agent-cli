@@ -166,10 +166,10 @@ def log_startup_banner(
     log.info("Mode:            %s", mode)
     if wallet_address:
         log.info("Wallet:          %s...%s", wallet_address[:6], wallet_address[-4:])
-    log.info("Budget:          $%,.0f", budget)
+    log.info("Budget:          $%s", f"{budget:,.0f}")
     log.info("Slots:           %d", slots)
     log.info("Leverage:        %sx", leverage)
-    log.info("Daily loss limit: $%,.0f", daily_loss_limit)
+    log.info("Daily loss limit: $%s", f"{daily_loss_limit:,.0f}")
     log.info("Guard preset:    %s", guard_preset)
     log.info("Obsidian:        %s", "enabled" if obsidian_enabled else "disabled")
     log.info("REFLECT:         every %d ticks", reflect_interval)

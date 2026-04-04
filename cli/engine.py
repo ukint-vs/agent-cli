@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from cli.hl_adapter import APICircuitBreakerOpen
-from common.models import MarketSnapshot
+from common.models import MarketSnapshot, instrument_to_coin
 from common.venue_adapter import VenueAdapter
 from parent.position_tracker import Position, PositionTracker
 from parent.risk_manager import RiskLimits, RiskManager
@@ -89,7 +89,7 @@ class TradingEngine:
 
         # Set leverage from risk config (not hardcoded)
         if not self.dry_run and hasattr(self.hl, 'set_leverage'):
-            coin = self.instrument.replace("-PERP", "").replace("-perp", "")
+            coin = instrument_to_coin(self.instrument)
             max_lev = int(self.risk_manager.limits.max_leverage)
             self.hl.set_leverage(max_lev, coin)
 
