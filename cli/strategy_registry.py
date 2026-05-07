@@ -99,6 +99,11 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "description": "Live adapter wrapping auto-researchtrading strategy.py (always latest)",
         "params": {"instrument": "ETH", "equity": 100000},
     },
+    "autoresearch_5m": {
+        "path": "strategies.autoresearch_5m_live:Autoresearch5mLiveAdapter",
+        "description": "Native 5m strategy — signals every 5 minutes on raw 5m bars",
+        "params": {"instrument": "ETH", "equity": 200},
+    },
     "autoresearch_legacy": {
         "path": "strategies.autoresearch:AutoresearchStrategy",
         "description": "[DEPRECATED] Stale manual port of S4 champion — use 'autoresearch' instead",
