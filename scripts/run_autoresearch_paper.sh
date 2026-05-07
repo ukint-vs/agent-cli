@@ -1,6 +1,6 @@
 #!/bin/bash
-# Paper trade autoresearch S4 across 4 coins overnight.
-# Real mainnet market data, simulated execution. No real orders placed.
+# Paper trade autoresearch across 4 coins on TESTNET.
+# Uses testnet prices, simulated fills. No real orders.
 #
 # Usage: nohup ./scripts/run_autoresearch_paper.sh > paper_trading.log 2>&1 &
 # Check: tail -f paper_trading.log
@@ -14,43 +14,44 @@ CONFIG_DIR="$BASE_DIR/configs/autoresearch_live"
 
 cd "$BASE_DIR"
 
-# Resolve key from keychain into env (workaround for list_keys bug)
+# Resolve key from keychain
 if [ -z "$HL_PRIVATE_KEY" ]; then
     KEY=$(security find-generic-password -s "agent-cli" -a "0x67117f4fb25a0346039afde63b8b796a93c098c8" -w 2>/dev/null || true)
     if [ -n "$KEY" ]; then
         export HL_PRIVATE_KEY="$KEY"
-        echo "Loaded key from macOS Keychain"
-        export HL_TESTNET=false
     else
-        echo "ERROR: No HL_PRIVATE_KEY found. Set it or import to keychain."
+        echo "ERROR: No HL_PRIVATE_KEY found."
         exit 1
     fi
 fi
 
-COINS="eth xrp doge sol"
+# Paper mode uses mainnet data but simulated fills — safe to run against mainnet
+export HL_TESTNET=false
+
+COINS="ETH XRP DOGE SOL"
 PIDS=()
 
-echo "$(date): Starting paper trading — 4 coins, mainnet data, simulated fills"
+echo "$(date): Starting paper trading — 4 coins, MAINNET data, simulated fills"
 echo "Coins: $COINS"
 echo ""
 
 for coin in $COINS; do
-    config="$CONFIG_DIR/autoresearch_${coin}.yaml"
+    coin_lower=$(echo "$coin" | tr '[:upper:]' '[:lower:]')
+    config="$CONFIG_DIR/autoresearch_${coin_lower}.yaml"
     if [ ! -f "$config" ]; then
         echo "  ERROR: config not found: $config"
         continue
     fi
-    echo "  $(date): Starting $coin (paper)..."
-    uv run hl run autoresearch --config "$config" --mainnet --paper &
+    echo "  $(date): Starting $coin (paper, mainnet data)..."
+    uv run hl run autoresearch -i "${coin}-PERP" --config "$config" --paper &
     PIDS+=($!)
     sleep 3
 done
 
-# Save PIDs for easy cleanup
 echo "${PIDS[*]}" > /tmp/autoresearch_paper.pids
 
 echo ""
-echo "$(date): All 4 coins running in paper mode."
+echo "$(date): All 4 coins running in paper mode (testnet)."
 echo "PIDs: ${PIDS[*]} (saved to /tmp/autoresearch_paper.pids)"
 echo "Stop with: kill \$(cat /tmp/autoresearch_paper.pids)"
 echo ""
