@@ -293,12 +293,21 @@ class HLProxy:
         _patch_spot_meta_indexing()
 
         base_url = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
-        perp_dexs = [""] + list(HIP3_DEXS.keys())
         # Info() constructor calls perp_dexs() which hits HL API —
         # wrap with retry so startup 429s don't crash the agent.
-        self._info = _retry_on_429(
-            Info, base_url, skip_ws=True, timeout=10, perp_dexs=perp_dexs,
-        )
+        # Also fall back to perps-only if the SDK doesn't know about all
+        # configured HIP-3 dexes (e.g. yex on older SDK versions).
+        perp_dexs = [""] + list(HIP3_DEXS.keys())
+        try:
+            self._info = _retry_on_429(
+                Info, base_url, skip_ws=True, timeout=10, perp_dexs=perp_dexs,
+            )
+        except KeyError:
+            log.warning("SDK doesn't support all HIP-3 dexes, falling back to perps-only")
+            perp_dexs = [""]
+            self._info = _retry_on_429(
+                Info, base_url, skip_ws=True, timeout=10, perp_dexs=perp_dexs,
+            )
 
         account = Account.from_key(self.private_key)
         delegated = self._account_address
