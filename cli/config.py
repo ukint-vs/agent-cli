@@ -39,6 +39,7 @@ class TradingConfig:
 
     # Execution
     dry_run: bool = False
+    paper: bool = False
     max_ticks: int = 0
 
     # Persistence

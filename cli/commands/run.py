@@ -230,7 +230,8 @@ def run_cmd(
         raw_hl = HLProxy(private_key=private_key, testnet=not cfg.mainnet)
         real_proxy = DirectHLProxy(raw_hl)
         paper_dir = f"{cfg.data_dir}/paper"
-        hl = PaperTradingProxy(real_proxy, data_dir=paper_dir)
+        paper_bal = cfg.tvl if cfg.tvl < 100000 else None
+        hl = PaperTradingProxy(real_proxy, data_dir=paper_dir, paper_balance=paper_bal)
         cfg.data_dir = paper_dir
         network = "mainnet" if cfg.mainnet else "testnet"
         typer.echo(f"Mode: PAPER ({network} data, simulated execution)")

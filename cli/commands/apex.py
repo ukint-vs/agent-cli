@@ -18,6 +18,7 @@ def apex_run(
     config: Optional[Path] = typer.Option(None, "--config", "-c"),
     mock: bool = typer.Option(False, "--mock"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate orders without real HL connection (alias for --mock)"),
+    paper: bool = typer.Option(False, "--paper", help="Paper trading: real market data, simulated execution"),
     resume: bool = typer.Option(True, "--resume/--fresh", help="Resume from saved state or start fresh"),
     mainnet: bool = typer.Option(False, "--mainnet"),
     json_output: bool = typer.Option(False, "--json"),
@@ -44,7 +45,7 @@ def apex_run(
               resume=resume, mainnet=mainnet, json_output=json_output,
               max_ticks=max_ticks, budget=budget, slots=slots,
               leverage=leverage, markets=markets, data_dir=data_dir,
-              strategy_names=strategy_names)
+              strategy_names=strategy_names, paper=paper)
 
 
 @apex_app.command("once")
@@ -192,7 +193,7 @@ def apex_presets():
 
 def _run_apex(tick, preset, config, mock, mainnet, json_output,
               max_ticks, budget, slots, leverage, data_dir, single=False,
-              resume=True, markets=None, strategy_names=None):
+              resume=True, markets=None, strategy_names=None, paper=False):
     project_root = str(Path(__file__).resolve().parent.parent.parent)
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
@@ -238,7 +239,25 @@ def _run_apex(tick, preset, config, mock, mainnet, json_output,
     # Auto-detect Obsidian vault if not explicitly configured
     cfg.obsidian_vault_path = resolve_obsidian_path(cfg.obsidian_vault_path)
 
-    if mock:
+    if paper:
+        from cli.hl_adapter import DirectHLProxy
+        from cli.config import TradingConfig
+        from parent.hl_proxy import HLProxy
+        from adapters.paper_adapter import PaperTradingProxy
+
+        try:
+            private_key = TradingConfig().get_private_key()
+        except RuntimeError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        raw_hl = HLProxy(private_key=private_key, testnet=not mainnet)
+        real_proxy = DirectHLProxy(raw_hl)
+        paper_dir = f"{data_dir}/paper"
+        hl = PaperTradingProxy(real_proxy, data_dir=paper_dir)
+        data_dir = paper_dir
+        network = "mainnet" if mainnet else "testnet"
+        typer.echo(f"Mode: PAPER ({network} data, simulated execution)")
+    elif mock:
         from cli.hl_adapter import DirectMockProxy
         hl = DirectMockProxy()
         typer.echo("Mode: MOCK")
