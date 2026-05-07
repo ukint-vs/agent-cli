@@ -1,0 +1,18 @@
+# Autoresearch $1K strategy — XRP mainnet (5 coins, 5x leverage)
+# equity = $1000 / 5 coins = $200 per coin
+strategy: autoresearch
+instrument: XRP-PERP
+tick_interval: 60.0
+mainnet: true
+data_dir: data/autoresearch-2k/xrp
+
+strategy_params:
+  instrument: XRP
+  equity: 200.0
+
+max_position_qty: 100.0   # ~$220 at ~$2.20 XRP
+max_notional_usd: 250
+max_order_size: 100.0
+max_daily_drawdown_pct: 5.0
+max_leverage: 5.0
+tvl: 200.0

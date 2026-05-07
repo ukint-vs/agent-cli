@@ -1,0 +1,18 @@
+# Autoresearch $1K strategy — DOGE mainnet (5 coins, 5x leverage)
+# equity = $1000 / 5 coins = $200 per coin
+strategy: autoresearch
+instrument: DOGE-PERP
+tick_interval: 60.0
+mainnet: true
+data_dir: data/autoresearch-2k/doge
+
+strategy_params:
+  instrument: DOGE
+  equity: 200.0
+
+max_position_qty: 1200.0  # ~$216 at ~$0.18 DOGE
+max_notional_usd: 250
+max_order_size: 1200.0
+max_daily_drawdown_pct: 5.0
+max_leverage: 5.0
+tvl: 200.0

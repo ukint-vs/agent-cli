@@ -1,0 +1,18 @@
+# Native 5m strategy — SUI mainnet ($1K, 3 coins, 10x leverage)
+# equity = $333/coin, position = $75-$180 (vote-scaled)
+strategy: autoresearch_5m
+instrument: SUI-PERP
+tick_interval: 15.0
+mainnet: true
+data_dir: data/autoresearch-5m/sui
+
+strategy_params:
+  instrument: SUI
+  equity: 333.0
+
+max_position_qty: 200.0   # ~$170 at ~$0.85 SUI
+max_notional_usd: 300
+max_order_size: 200.0
+max_daily_drawdown_pct: 6.0
+max_leverage: 10.0
+tvl: 333.0

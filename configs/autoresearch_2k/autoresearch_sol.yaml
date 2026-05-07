@@ -1,0 +1,18 @@
+# Autoresearch $1K strategy — SOL mainnet (5 coins, 5x leverage)
+# equity = $1000 / 5 coins = $200 per coin
+strategy: autoresearch
+instrument: SOL-PERP
+tick_interval: 30.0
+mainnet: true
+data_dir: data/autoresearch-2k/sol
+
+strategy_params:
+  instrument: SOL
+  equity: 200.0
+
+max_position_qty: 1.5     # ~$225 at ~$150 SOL
+max_notional_usd: 250
+max_order_size: 1.5
+max_daily_drawdown_pct: 5.0
+max_leverage: 5.0
+tvl: 200.0
