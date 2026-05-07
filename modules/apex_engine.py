@@ -170,10 +170,15 @@ class ApexEngine:
                         reason=f"conviction_collapse: {elapsed_min:.0f}min no signal, ROE={slot.current_roe:.1f}%",
                     )
 
-        # 4. Stagnation
+        # 4. Stagnation TP — winners taking profit
+        # v3: deliberately bypasses min_hold. The hard stop (rule 2) fires
+        # immediately on losses regardless of min_hold, so blocking the
+        # take-profit side here was structurally asymmetric — it cut winners
+        # slowly while losers stopped on noise. Profitable positions should
+        # be free to crystallise PnL at any time.
         if slot.current_roe >= cfg.stagnation_min_roe and slot.last_progress_ts > 0:
             stagnation_min = (now_ms - slot.last_progress_ts) / 60_000
-            if stagnation_min >= cfg.stagnation_minutes and not under_min_hold:
+            if stagnation_min >= cfg.stagnation_minutes:
                 return ApexAction(
                     action="exit", slot_id=slot.slot_id,
                     instrument=slot.instrument, direction=slot.direction,
@@ -245,8 +250,11 @@ class ApexEngine:
                 })
 
         # Priority 2.25: Directional strategy signals
+        # Use dedicated threshold (default 50) so strategies aren't blocked
+        # by pulse_confidence_threshold being set high to disable pulse.
+        strategy_threshold = getattr(cfg, "strategy_confidence_threshold", 50.0)
         for sig in strategy_signals:
-            if sig.get("confidence", 0) >= cfg.pulse_confidence_threshold:
+            if sig.get("confidence", 0) >= strategy_threshold:
                 instrument = asset_to_instrument(sig["asset"])
                 candidates.append({
                     "instrument": instrument,
@@ -268,6 +276,11 @@ class ApexEngine:
                         "score": sig.get("confidence", 0),
                         "priority": 3,
                     })
+
+        # Flip signal direction if configured (mean-reversion on exhaustion signals)
+        if cfg.flip_signal_direction:
+            for c in candidates:
+                c["direction"] = "short" if c["direction"] == "long" else "long"
 
         # Deduplicate by instrument (keep highest priority)
         seen = set()

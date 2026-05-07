@@ -104,10 +104,39 @@ class ApexRunner:
         else:
             self.state = ApexState.new(self.config.max_slots)
 
-        # Sub-guards
-        self.pulse_guard = PulseGuard()
-        self.radar_guard = RadarGuard()
+        # Sub-guards. When the APEX config has a preset_name that maps to
+        # known pulse/radar presets (e.g. "competition"), construct the
+        # guards with the matching preset rather than the default config.
+        # This is the only way to lower pulse/radar thresholds at boot —
+        # they ignore APEX-level CLI flags otherwise.
+        from modules.pulse_config import PULSE_PRESETS
+        from modules.radar_config import RADAR_PRESETS
+        preset_name = (getattr(self.config, "preset_name", "") or "").lower()
+        pulse_cfg = PULSE_PRESETS.get(preset_name)
+        radar_cfg = RADAR_PRESETS.get(preset_name)
+        self.pulse_guard = PulseGuard(config=pulse_cfg) if pulse_cfg else PulseGuard()
+        self.radar_guard = RadarGuard(config=radar_cfg) if radar_cfg else RadarGuard()
         self.radar_guard.history.path = f"{data_dir}/radar-history.json"
+        if pulse_cfg or radar_cfg:
+            log.info(
+                "Sub-guards loaded with preset %r: pulse=%s radar=%s",
+                preset_name, "preset" if pulse_cfg else "default",
+                "preset" if radar_cfg else "default",
+            )
+
+        # Sync the APEX config's radar_score_threshold to the radar guard at
+        # boot. Without this, the radar guard always uses RadarConfig's default
+        # score_threshold (150) regardless of APEX preset, and the only way to
+        # change it was via a runtime config-override JSON file. The
+        # `competition` preset relies on this sync to lower the threshold to
+        # 110 at startup.
+        try:
+            self.radar_guard.config.score_threshold = self.config.radar_score_threshold
+            self.radar_guard.engine = type(self.radar_guard.engine)(self.radar_guard.config)
+            log.info("Radar guard score_threshold synced to APEX preset: %d",
+                     self.config.radar_score_threshold)
+        except Exception as e:
+            log.warning("Failed to sync radar score_threshold at boot: %s", e)
 
         # Clear radar scan history on --fresh so stale signals don't persist
         if not resume:
@@ -195,11 +224,37 @@ class ApexRunner:
         self._max_consecutive_timeouts = 3
         self._tick_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="apex-tick")
 
+        # Health/error state surfaced via /metrics for the dashboard FE.
+        # The runner used to log "** NO FUNDS DETECTED **" loudly to its own
+        # logs but never propagate that state upward, so the FE rendered the
+        # agent as "RUNNING" while it was actually unable to place any orders.
+        # These two fields make degraded states visible to anything reading
+        # the metrics endpoint.
+        #
+        # error_state: short stable identifier ("unfunded", "preflight_failed",
+        #   "order_rejected", "tick_timeout", None) — UI maps to a banner.
+        # can_trade: false when we know with high confidence the agent cannot
+        #   submit a successful order right now (e.g. account_value is 0).
+        #   true when preflight passed; defaults to true so we don't hide
+        #   functioning agents on transient errors.
+        self._error_state: Optional[str] = None
+        self._error_detail: Optional[str] = None
+        self._can_trade: bool = True
+
     def _init_strategy_guard(self) -> None:
-        """Initialize strategy guard based on config: auto-route for mapped markets, or legacy opt-in."""
+        """Initialize strategy guard based on config: explicit names first, then auto-route."""
         from modules.market_strategy_map import has_strategy_mapping
 
-        if (self.config.strategy_enabled
+        # Explicit strategy_names takes priority over auto-routing.
+        # This allows per-agent strategy assignment via STRATEGY_NAMES env var
+        # even when allowed_instruments has entries in MARKET_STRATEGY_MAP.
+        if self.config.strategy_enabled and self.config.strategy_names:
+            self.strategy_guard = StrategyGuard(
+                strategy_names=self.config.strategy_names,
+                enabled=True,
+            )
+            log.info("Strategy guard (explicit): %s", self.config.strategy_names)
+        elif (self.config.strategy_enabled
                 and self.config.allowed_instruments
                 and has_strategy_mapping(self.config.allowed_instruments)):
             self.strategy_guard = StrategyGuard(
@@ -207,12 +262,6 @@ class ApexRunner:
                 enabled=True,
             )
             log.info("Strategy guard (auto-routed): markets=%s", self.config.allowed_instruments)
-        elif self.config.strategy_enabled and self.config.strategy_names:
-            self.strategy_guard = StrategyGuard(
-                strategy_names=self.config.strategy_names,
-                enabled=True,
-            )
-            log.info("Strategy guard (explicit): %d strategies loaded", len(self.strategy_guard.strategies))
         else:
             self.strategy_guard = None
 
@@ -227,7 +276,12 @@ class ApexRunner:
                 log.info("Restored Guard bridge for slot %d (%s)", slot.slot_id, slot.instrument)
 
     def _preflight_check(self) -> None:
-        """Verify account has funds before starting. Warns loudly if not."""
+        """Verify account has funds before starting. Warns loudly if not.
+
+        Also sets self._error_state / self._can_trade so the dashboard FE
+        can render the degraded state via the /metrics endpoint instead of
+        showing "RUNNING" while the agent silently fails to place orders.
+        """
         try:
             account = self.hl.get_account_state()
             # get_account_state() returns processed dict with "account_value" key
@@ -240,16 +294,31 @@ class ApexRunner:
                         "** NO FUNDS DETECTED ** "
                         "On testnet, claim USDyP first: hl setup claim-usdyp"
                     )
+                    detail = "Testnet account is empty. Run: hl setup claim-usdyp"
                 else:
                     log.warning(
                         "** NO FUNDS DETECTED ** "
                         "On mainnet, deposit USDC via the Hyperliquid web UI"
                     )
-                log.warning("Without funds, all orders will fail silently.")
+                    detail = "Account balance is $0. Deposit USDC to start trading."
+                log.warning("Without funds, orders will be rejected.")
+                self._error_state = "unfunded"
+                self._error_detail = detail
+                self._can_trade = False
             else:
                 log.info("Account balance: $%.2f", balance)
+                self._error_state = None
+                self._error_detail = None
+                self._can_trade = True
         except Exception as e:
-            log.warning("Preflight balance check failed: %s (continuing anyway)", e)
+            # Don't claim the agent is broken just because the balance probe
+            # failed — the network might be flaky. Log a distinct state so
+            # the FE can show "health check failed, retrying" instead of
+            # silently treating the agent as healthy.
+            log.warning("Preflight balance check failed: %s (continuing)", e)
+            self._error_state = "preflight_failed"
+            self._error_detail = f"Could not query HL account state: {e}"
+            # Leave can_trade alone — we don't know either way
 
     def run(self, max_ticks: int = 0) -> None:
         """Main loop. Blocks until max_ticks reached or SIGINT."""
@@ -389,6 +458,50 @@ class ApexRunner:
         merged_meta["universe"] = merged_universe
         return [merged_meta, merged_ctxs]
 
+    def _filter_to_allowed(self, all_markets: list) -> list:
+        """Restrict the (universe, ctxs) pair to assets in allowed_instruments.
+
+        Without this, pulse_engine and radar_engine scan the full HL universe
+        (~210 assets) and only filter at the signal-emit step. The agents in
+        the yex testnet competition were producing 0 signals because BTCSWP-
+        USDYP never made it through the radar's `top_n_deep` selection — too
+        many high-volume HL perps competed for the slot. Pre-filtering here
+        focuses both engines on the 3-asset yex universe so radar/pulse score
+        every yex asset on every tick instead of dropping them silently.
+
+        Safe-guarded: returns the input unchanged when allowed_instruments is
+        empty (e.g. mainnet runs that scan the full universe).
+        """
+        allowed = set(self.config.allowed_instruments) if self.config.allowed_instruments else None
+        if not allowed or len(all_markets) < 2:
+            return all_markets
+        universe = all_markets[0].get("universe", [])
+        ctxs = all_markets[1]
+        kept_universe: list = []
+        kept_ctxs: list = []
+        for i, entry in enumerate(universe):
+            try:
+                name = entry.get("name", "") if isinstance(entry, dict) else ""
+            except (AttributeError, TypeError):
+                continue
+            if asset_matches_allowed(name, allowed):
+                kept_universe.append(entry)
+                if i < len(ctxs):
+                    kept_ctxs.append(ctxs[i])
+        if not kept_universe:
+            # Defensive: never collapse to empty — that would silently disable
+            # trading instead of just narrowing the scan. Fall back to merged
+            # universe so the asymmetry is loud (logged stats remain non-zero).
+            log.warning(
+                "_filter_to_allowed produced empty universe (allowed=%s). "
+                "Falling back to full merged universe.",
+                sorted(allowed),
+            )
+            return all_markets
+        meta = dict(all_markets[0])
+        meta["universe"] = kept_universe
+        return [meta, kept_ctxs]
+
     def _get_all_mids(self) -> dict:
         """Fetch mid prices including HIP-3 DEXs if any are needed."""
         mids = self.hl.get_all_mids()
@@ -432,6 +545,13 @@ class ApexRunner:
                 "total_trades": self.state.total_trades,
                 "safe_mode": getattr(self.state, "safe_mode", False),
                 "consecutive_timeouts": self._consecutive_timeouts,
+                # Health/error fields surfaced to the dashboard FE so it can
+                # render a banner when the agent is in a degraded state
+                # (unfunded, repeated rejections, etc.) instead of showing
+                # "RUNNING" while orders are silently failing.
+                "error_state": self._error_state,
+                "error_detail": self._error_detail,
+                "can_trade": self._can_trade,
                 "updated_at": int(time.time() * 1000),
             }
             metrics_path = Path(self.data_dir) / "metrics.json"
@@ -472,6 +592,9 @@ class ApexRunner:
         if self.strategy_guard and tick % self.config.strategy_interval_ticks == 0:
             try:
                 all_markets = self.hl.get_all_markets()
+                # HIP-3 dex assets (BTCSWP, VXX, US3M) aren't in universal
+                # perps. Merge dex data so strategies can see them.
+                all_markets = self._merge_hip3_markets(all_markets)
                 strategy_signals = self.strategy_guard.scan(
                     all_markets=all_markets,
                     slot_prices=slot_prices,
@@ -614,6 +737,10 @@ class ApexRunner:
         try:
             all_markets = self.hl.get_all_markets()
             all_markets = self._merge_hip3_markets(all_markets)
+            # v3: focus pulse on the explicitly-allowed instruments. Without
+            # this, pulse scans the full HL universe and the few yex assets
+            # we actually trade get drowned out by 207 standard perps.
+            all_markets = self._filter_to_allowed(all_markets)
 
             # Fetch 4h candles for qualifying assets so volume surge detection works
             asset_candles: Dict[str, Dict[str, List[Dict]]] = {}
@@ -671,6 +798,9 @@ class ApexRunner:
 
             all_markets = self.hl.get_all_markets()
             all_markets = self._merge_hip3_markets(all_markets)
+            # v3: same fix as pulse — restrict to allowed_instruments so the
+            # radar's `top_n_deep` slot doesn't get monopolised by HL majors.
+            all_markets = self._filter_to_allowed(all_markets)
 
             # Pre-screen to find which assets need candle data
             assets = self.radar_guard.engine._bulk_screen(all_markets)
@@ -888,10 +1018,27 @@ class ApexRunner:
             size = (self.config.margin_per_slot * self.config.leverage) / mid
             side = "buy" if action.direction == "long" else "sell"
 
-            # Entry order type: directional strategies use IOC (need immediate fills
-            # on fast-moving assets), pulse/radar use configured default (ALO for rebates)
+            # Entry order type. Original logic was:
+            #   directional sources -> IOC (taker, immediate fill)
+            #   pulse/radar         -> ALO (maker, post-only)
+            # This silently broke the testnet competition because ALO orders
+            # on the 3 yex markets almost never cross the spread — they sit
+            # resting at the mid for one tick, get cancelled by the runner,
+            # and the agent reports "Entry fill failed" forever. Switching
+            # to IOC across the board for low-liquidity / competition mode
+            # makes pulse/radar entries cross the spread and actually fill.
+            # The maker rebate is meaningless on $1000 positions.
+            #
+            # Honour cfg.entry_order_type when set (lets the competition
+            # preset force "Ioc" for everything).
+            cfg_tif = getattr(self.config, "entry_order_type", "Alo")
             is_directional = action.source not in ("pulse_immediate", "pulse_signal", "radar")
-            entry_tif = "Ioc" if is_directional else getattr(self.config, "entry_order_type", "Alo")
+            if cfg_tif and cfg_tif.lower() == "ioc":
+                entry_tif = "Ioc"
+            elif is_directional:
+                entry_tif = "Ioc"
+            else:
+                entry_tif = cfg_tif
             fill = self.hl.place_order(
                 instrument=action.instrument,
                 side=side,
@@ -934,10 +1081,27 @@ class ApexRunner:
                 log.info("ENTERED slot %d: %s %s @ %.4f size=%.4f (%s)",
                          slot.slot_id, action.direction, action.instrument,
                          float(fill.price), float(fill.quantity), action.reason)
+                # Successful fill clears any prior unfunded/order_rejected
+                # state — the agent is clearly trading.
+                if self._error_state in ("unfunded", "order_rejected"):
+                    self._error_state = None
+                    self._error_detail = None
+                    self._can_trade = True
             else:
                 log.warning("Entry fill failed for %s", action.instrument)
                 slot.status = "empty"
                 slot.instrument = ""
+                # Surface the rejection to the FE. We don't know the HL
+                # rejection reason at this layer (the adapter logs it but
+                # doesn't return it), so use a generic state. Most common
+                # cause is insufficient margin — the dashboard banner can
+                # link to the funding flow.
+                if self._error_state != "unfunded":
+                    self._error_state = "order_rejected"
+                    self._error_detail = (
+                        f"HL rejected entry on {action.instrument}. "
+                        f"Most likely insufficient margin."
+                    )
 
         except Exception as e:
             log.error("Entry failed for %s: %s", action.instrument, e)
@@ -1030,6 +1194,45 @@ class ApexRunner:
                 close_ts=close_ts,
             )
             self.journal_guard.log_entry(journal_entry)
+
+            # Phase 1.1 + 1.2: emit per-trade telemetry to the central
+            # attribution sink with builder-fee-adjusted net PnL. Without
+            # this every preset change is blind. The journal engine itself
+            # only knows gross PnL — we subtract fees here using the actual
+            # entry notional we have on hand.
+            if self.telemetry:
+                try:
+                    notional_usd = float(slot.entry_size or 0.0) * float(slot.entry_price or 0.0)
+                    # 10 bps builder fee per side (entry + exit) = 20 bps
+                    # round-trip. Source of truth: BuilderFeeConfig.fee_bps
+                    # in cli/builder_fee.py. Hardcoding here so the emitter
+                    # has zero coupling to order construction.
+                    fee_bps_round_trip = 20.0
+                    fees_estimate = notional_usd * fee_bps_round_trip / 10_000.0
+                    net_pnl = pnl - fees_estimate
+                    self.telemetry.trade({
+                        "instrument": slot.instrument,
+                        "direction": slot.direction,
+                        "entry_source": slot.entry_source or "unknown",
+                        "entry_signal_score": slot.entry_signal_score,
+                        "signal_quality": journal_entry.signal_quality,
+                        "close_reason": reason,
+                        "entry_price": slot.entry_price,
+                        "exit_price": slot.current_price,
+                        "entry_size": slot.entry_size,
+                        "notional_usd": round(notional_usd, 2),
+                        "gross_pnl": round(pnl, 4),
+                        "fees_estimate": round(fees_estimate, 4),
+                        "net_pnl": round(net_pnl, 4),
+                        "roe_pct": slot.current_roe,
+                        "holding_ms": close_ts - slot.entry_ts,
+                        "entry_ts": slot.entry_ts,
+                        "close_ts": close_ts,
+                        "preset_name": getattr(self.config, "preset_name", "") or "",
+                        "leverage": self.config.leverage,
+                    })
+                except Exception as te:
+                    log.debug("trade telemetry emit failed (non-fatal): %s", te)
 
             # Notable trade -> memory + obsidian
             if abs(pnl) > self.config.margin_per_slot * 0.1:

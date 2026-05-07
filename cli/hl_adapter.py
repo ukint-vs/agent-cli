@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import time
 from decimal import Decimal
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from common.models import HIP3_DEXS, instrument_to_coin
 from parent.hl_proxy import HLFill, HLProxy, MockHLProxy
@@ -19,12 +22,81 @@ from parent.hl_proxy import HLFill, HLProxy, MockHLProxy
 log = logging.getLogger("hl_adapter")
 
 # --- Constants ---
-SLIPPAGE_FACTOR = 1.005       # IOC slippage multiplier to cross the spread
+SLIPPAGE_FACTOR = 1.002       # IOC slippage multiplier to cross the spread (v3: 50bps→20bps; tighter to reduce entry cost on thin yex markets)
 SIG_FIGS = 5                  # HL uses 5 significant figures for prices
 CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive API failures before circuit opens
 MAX_RATE_LIMIT_RETRIES = 3
 BACKOFF_BASE_S = 2.0
 BACKOFF_MAX_S = 8.0
+
+# Shared file-system cache for HIP-3 dex data. Without this, every agent in
+# the fleet hits HL's /info endpoint independently every tick to fetch yex
+# markets/mids, and CloudFront 429s the bursts. With 14 agents on a 60s tick
+# that's 28+ yex requests/minute from one IP — well over the limit. The
+# cache lives in /tmp (or DEX_CACHE_DIR) and is keyed by (kind, dex). TTL
+# is intentionally short so live data stays fresh; the win is that within
+# any TTL window, only one agent actually hits HL.
+SHARED_CACHE_DIR = os.environ.get("DEX_CACHE_DIR", os.path.join(tempfile.gettempdir(), "nunchi_dex_cache"))
+DEX_CACHE_DIR = SHARED_CACHE_DIR  # backwards compat
+DEX_CACHE_TTL_S = float(os.environ.get("DEX_CACHE_TTL_S", "30"))
+# Candle data changes slowly — 60s TTL is safe and cuts API calls by 95%+
+CANDLE_CACHE_TTL_S = float(os.environ.get("CANDLE_CACHE_TTL_S", "60"))
+# Market meta/mids refresh every 30s (same as dex cache)
+MARKET_CACHE_TTL_S = float(os.environ.get("MARKET_CACHE_TTL_S", "30"))
+
+
+def _cache_path(key: str) -> Path:
+    Path(SHARED_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    return Path(SHARED_CACHE_DIR) / f"{key}.json"
+
+
+def _cache_read(key: str, ttl_s: float) -> Optional[Any]:
+    """Return cached payload if fresh, else None. Best-effort, never raises."""
+    p = _cache_path(key)
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return None
+    age = time.time() - st.st_mtime
+    if age > ttl_s:
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+
+def _cache_write(key: str, payload: Any) -> None:
+    """Atomic write so concurrent readers never see a partial file."""
+    p = _cache_path(key)
+    try:
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(p)
+    except Exception as e:
+        log.debug("cache write failed for %s: %s", key, e)
+
+
+def _cache_read_stale(key: str) -> Optional[Any]:
+    """Read cache ignoring TTL — used as fallback on API failure."""
+    p = _cache_path(key)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return None
+
+
+# Backwards-compat wrappers for existing dex cache callers
+def _dex_cache_path(kind: str, dex: str) -> Path:
+    return _cache_path(f"{kind}_{dex}")
+
+def _dex_cache_read(kind: str, dex: str) -> Optional[Any]:
+    return _cache_read(f"{kind}_{dex}", DEX_CACHE_TTL_S)
+
+def _dex_cache_write(kind: str, dex: str, payload: Any) -> None:
+    _cache_write(f"{kind}_{dex}", payload)
 
 
 class APICircuitBreakerOpen(Exception):
@@ -168,16 +240,35 @@ class DirectHLProxy:
             log.error("Failed to get account state: %s", e)
             return {}
 
-        # Merge HIP-3 DEX positions (e.g. YEX) so watchdog/reconciliation sees them.
+        # Merge HIP-3 DEX state (e.g. YEX). Two things to merge:
+        #   1. Asset positions (so watchdog/reconciliation can see open trades)
+        #   2. accountValue / margin / withdrawable (so preflight, budget
+        #      calculations, and any other code reading account_value can see
+        #      funds held inside the HIP-3 clearinghouse)
+        #
+        # Without merging the account value, agents in PR 3 mode (dedicated
+        # agent wallets, funded by treasury into yex) report
+        # "** NO FUNDS DETECTED **" at preflight even though they hold
+        # $1000 USDYP in yex, because the universal clearinghouse query
+        # returns $0.
         for dex_id in HIP3_DEXS:
             try:
                 dex_state = self._info.post("/info", {
                     "type": "clearinghouseState", "user": self._address, "dex": dex_id,
                 })
-                if dex_state and dex_state.get("assetPositions"):
+                if not dex_state:
+                    continue
+                if dex_state.get("assetPositions"):
                     result["positions"].extend(dex_state["assetPositions"])
+                dex_margin = dex_state.get("marginSummary", {}) or {}
+                try:
+                    result["account_value"] += float(dex_margin.get("accountValue", 0) or 0)
+                    result["total_margin"] += float(dex_margin.get("totalMarginUsed", 0) or 0)
+                    result["withdrawable"] += float(dex_state.get("withdrawable", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
             except Exception as e:
-                log.warning("Failed to fetch %s positions: %s", dex_id, e)
+                log.warning("Failed to fetch %s state: %s", dex_id, e)
 
         # Fetch spot balances (separate endpoint).
         spot_balances = self._fetch_spot_balances()
@@ -469,24 +560,84 @@ class DirectHLProxy:
             return []
 
     def get_candles(self, coin: str, interval: str, lookback_ms: int) -> list:
-        """Fetch candle data from HL."""
-        return self._hl.get_candles(coin, interval, lookback_ms)
+        """Fetch candle data from HL (shared file cache, 60s TTL).
+
+        28 agents × 3 timeframes × N markets = hundreds of candle calls per
+        scan interval. The cache means only the first agent to request a
+        (coin, interval) pair within the TTL window hits HL; the rest read
+        from disk. This alone cuts candle API calls by ~95%.
+        """
+        key = f"candles_{coin}_{interval}"
+        cached = _cache_read(key, CANDLE_CACHE_TTL_S)
+        if cached is not None:
+            return cached
+        data = self._hl.get_candles(coin, interval, lookback_ms)
+        _cache_write(key, data)
+        return data
 
     def get_all_markets(self) -> list:
-        """Fetch metadata + asset contexts for all perps."""
-        return self._hl.get_meta_and_asset_ctxs()
+        """Fetch metadata + asset contexts for all perps (shared cache, 30s TTL)."""
+        cached = _cache_read("all_markets", MARKET_CACHE_TTL_S)
+        if cached is not None:
+            return cached
+        data = self._hl.get_meta_and_asset_ctxs()
+        _cache_write("all_markets", data)
+        return data
 
     def get_all_mids(self) -> Dict[str, str]:
-        """Fetch mid prices for all assets."""
-        return self._hl.get_all_mids()
+        """Fetch mid prices for all assets (shared cache, 30s TTL)."""
+        cached = _cache_read("all_mids", MARKET_CACHE_TTL_S)
+        if cached is not None:
+            return cached
+        data = self._hl.get_all_mids()
+        _cache_write("all_mids", data)
+        return data
 
     def get_dex_markets(self, dex: str) -> list:
-        """Fetch HIP-3 DEX metaAndAssetCtxs."""
-        return self._hl.get_dex_markets(dex)
+        """Fetch HIP-3 DEX metaAndAssetCtxs (file-cached, see DEX_CACHE_TTL_S).
+
+        Without the cache, 14+ fleet agents independently hit HL's /info
+        endpoint every tick and CloudFront 429s the bursts, which silently
+        breaks pulse/radar's view of the yex universe (see _merge_hip3_markets
+        in standalone_runner.py). The cache makes the second-through-Nth
+        caller within the TTL window read from disk instead of HL.
+        """
+        cached = _dex_cache_read("markets", dex)
+        if cached is not None:
+            return cached
+        try:
+            data = self._hl.get_dex_markets(dex)
+            _dex_cache_write("markets", dex, data)
+            return data
+        except Exception as e:
+            # On failure, serve stale cache if any (better than empty universe).
+            stale_path = _dex_cache_path("markets", dex)
+            if stale_path.exists():
+                try:
+                    log.warning("get_dex_markets(%s) failed (%s) — serving stale cache", dex, e)
+                    return json.loads(stale_path.read_text())
+                except Exception:
+                    pass
+            raise
 
     def get_dex_mids(self, dex: str) -> Dict[str, str]:
-        """Fetch HIP-3 DEX mid prices."""
-        return self._hl.get_dex_mids(dex)
+        """Fetch HIP-3 DEX mid prices (file-cached, see DEX_CACHE_TTL_S)."""
+        cached = _dex_cache_read("mids", dex)
+        if cached is not None:
+            return cached
+        try:
+            data = self._hl.get_dex_mids(dex)
+            _dex_cache_write("mids", dex, data)
+            return data
+        except Exception as e:
+            stale_path = _dex_cache_path("mids", dex)
+            if stale_path.exists():
+                try:
+                    log.warning("get_dex_mids(%s) failed (%s) — serving stale cache", dex, e)
+                    return json.loads(stale_path.read_text())
+                except Exception:
+                    pass
+            raise
 
     def _to_coin(self, instrument: str) -> str:
         """Map instrument to HL coin symbol."""
